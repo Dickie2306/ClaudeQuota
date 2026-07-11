@@ -367,36 +367,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    /// Credential strategy (v1.2):
-    /// 1. Use whichever stored token is still valid — Claude Code's (read-only)
-    ///    or our own — preferring the later-expiring one, so whenever Claude
-    ///    Code refreshes we automatically ride its credentials.
-    /// 2. Only when nothing valid exists, refresh from the freshest chain and
-    ///    store the result in ClaudeQuota's OWN keychain item. Claude Code's
-    ///    item is never written.
+    /// Credential strategy (v1.1.1): our own chain first, Claude Code's item
+    /// only as seed/recovery. Once ClaudeQuota holds its own refresh token the
+    /// chain is self-sustaining, and every avoided read of Claude Code's item
+    /// is an avoided Keychain prompt — Claude Code wipes our read grant each
+    /// time it rewrites that item. Claude Code's item is never written.
     private func obtainCredentials() throws -> Credentials {
-        let cc = try? Keychain.readCredentials()
-        let own = Keychain.readOwnCredentials()
-        let candidates = [cc, own].compactMap { $0 }
-        guard let freshest = candidates.max(by: { $0.expiresAt < $1.expiresAt }) else {
-            throw KeychainError.status(errSecItemNotFound)
-        }
-        if let valid = candidates.filter({ !$0.isExpired }).max(by: { $0.expiresAt < $1.expiresAt }) {
-            return valid
-        }
-        do {
-            let refreshed = try API.refreshToken(freshest)
-            Keychain.writeOwnCredentials(refreshed)
-            return refreshed
-        } catch {
-            // Freshest chain rejected — try the other one before giving up.
-            if let other = candidates.first(where: { $0.refreshToken != freshest.refreshToken }) {
-                let refreshed = try API.refreshToken(other)
+        if let own = Keychain.readOwnCredentials() {
+            if !own.isExpired { return own }
+            do {
+                let refreshed = try API.refreshToken(own)
                 Keychain.writeOwnCredentials(refreshed)
                 return refreshed
+            } catch {
+                // Recovery: our refresh token may have been revoked — Claude
+                // Code's item might hold a newer chain. One read (and possible
+                // prompt) beats a dead gauge.
+                if let cc = try? Keychain.readCredentials() {
+                    if !cc.isExpired { return cc }
+                    if cc.refreshToken != own.refreshToken,
+                       let refreshed = try? API.refreshToken(cc) {
+                        Keychain.writeOwnCredentials(refreshed)
+                        return refreshed
+                    }
+                }
+                throw error
             }
-            throw error
         }
+        // First run (or own item deleted): seed from Claude Code's item.
+        let cc = try Keychain.readCredentials()
+        if !cc.isExpired { return cc }
+        let refreshed = try API.refreshToken(cc)
+        Keychain.writeOwnCredentials(refreshed)
+        return refreshed
     }
 
     private func refresh() {
