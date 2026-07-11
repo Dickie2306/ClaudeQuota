@@ -8,6 +8,10 @@ import UserNotifications
 
 enum Config {
     static let keychainService = "Claude Code-credentials"
+    // ClaudeQuota's OWN credential store. The app owns this item outright
+    // (created under our signing identity), so reads and writes never prompt
+    // and never touch Claude Code's item.
+    static let ownKeychainService = "ClaudeQuota-credentials"
     static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     static let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
     static let tokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
@@ -82,21 +86,48 @@ enum Keychain {
                            expiresAt: expires, raw: json, wrapped: wrapped)
     }
 
-    static func writeCredentials(_ creds: Credentials) throws {
-        var json = creds.raw
-        var oauth = (creds.wrapped ? json["claudeAiOauth"] as? [String: Any] : json) ?? [:]
-        oauth["accessToken"] = creds.accessToken
-        oauth["refreshToken"] = creds.refreshToken
-        oauth["expiresAt"] = creds.expiresAt
-        if creds.wrapped { json["claudeAiOauth"] = oauth } else { json = oauth }
-        let data = try JSONSerialization.data(withJSONObject: json)
+    // Deliberately NO write support for the item above: ClaudeQuota is
+    // read-only toward the shared Claude Code credential. Writing to it
+    // resets the item's access controls, which breaks Claude Code's own
+    // Keychain grants and triggers repeated password prompts. Claude Code
+    // alone maintains that item. Refreshed tokens go to our own item below.
+
+    static func readOwnCredentials() -> Credentials? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Config.keychainService,
+            kSecAttrService as String: Config.ownKeychainService,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        let attrs: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
-        guard status == errSecSuccess else { throw KeychainError.status(status) }
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let access = json["accessToken"] as? String,
+              let refresh = json["refreshToken"] as? String else { return nil }
+        return Credentials(accessToken: access, refreshToken: refresh,
+                           expiresAt: (json["expiresAt"] as? Double) ?? 0,
+                           raw: json, wrapped: false)
+    }
+
+    static func writeOwnCredentials(_ creds: Credentials) {
+        let payload: [String: Any] = [
+            "accessToken": creds.accessToken,
+            "refreshToken": creds.refreshToken,
+            "expiresAt": creds.expiresAt,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Config.ownKeychainService,
+        ]
+        let update: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = data
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 }
 
@@ -132,6 +163,9 @@ enum API {
         return result
     }
 
+    /// Exchange a refresh token for a fresh access token. Called only when
+    /// no stored token (Claude Code's or our own) is still valid, so it can
+    /// never race an active Claude Code session's credentials.
     static func refreshToken(_ creds: Credentials) throws -> Credentials {
         var req = URLRequest(url: Config.tokenURL)
         req.httpMethod = "POST"
@@ -298,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notifiedThresholds: Set<Double> = []
     private var notificationsAvailable = false
     private var planName: String?
+    private var isStale = false
     private let queue = DispatchQueue(label: "usage-poller", qos: .utility)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -332,23 +367,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
+    /// Credential strategy (v1.2):
+    /// 1. Use whichever stored token is still valid — Claude Code's (read-only)
+    ///    or our own — preferring the later-expiring one, so whenever Claude
+    ///    Code refreshes we automatically ride its credentials.
+    /// 2. Only when nothing valid exists, refresh from the freshest chain and
+    ///    store the result in ClaudeQuota's OWN keychain item. Claude Code's
+    ///    item is never written.
+    private func obtainCredentials() throws -> Credentials {
+        let cc = try? Keychain.readCredentials()
+        let own = Keychain.readOwnCredentials()
+        let candidates = [cc, own].compactMap { $0 }
+        guard let freshest = candidates.max(by: { $0.expiresAt < $1.expiresAt }) else {
+            throw KeychainError.status(errSecItemNotFound)
+        }
+        if let valid = candidates.filter({ !$0.isExpired }).max(by: { $0.expiresAt < $1.expiresAt }) {
+            return valid
+        }
+        do {
+            let refreshed = try API.refreshToken(freshest)
+            Keychain.writeOwnCredentials(refreshed)
+            return refreshed
+        } catch {
+            // Freshest chain rejected — try the other one before giving up.
+            if let other = candidates.first(where: { $0.refreshToken != freshest.refreshToken }) {
+                let refreshed = try API.refreshToken(other)
+                Keychain.writeOwnCredentials(refreshed)
+                return refreshed
+            }
+            throw error
+        }
+    }
+
     private func refresh() {
         queue.async { [weak self] in
             guard let self = self else { return }
             do {
-                var creds = try Keychain.readCredentials()
-                if creds.isExpired {
-                    creds = try API.refreshToken(creds)
-                    try? Keychain.writeCredentials(creds) // best-effort write-back
+                let creds: Credentials
+                do {
+                    creds = try self.obtainCredentials()
+                } catch let err as KeychainError {
+                    DispatchQueue.main.async { self.applyError("\(err)", backoff: false) }
+                    return
+                } catch APIError.http(429, _) {
+                    DispatchQueue.main.async { self.applyError("Rate limited — backing off", backoff: true) }
+                    return
+                } catch {
+                    // Token refresh failed (offline, or refresh token rejected):
+                    // hold last-known data and retry on the normal poll cycle.
+                    DispatchQueue.main.async { self.applyStale() }
+                    return
                 }
-                var windows: [UsageWindow]
+                let windows: [UsageWindow]
                 do {
                     windows = try API.fetchUsage(accessToken: creds.accessToken)
                 } catch APIError.http(401, _) {
-                    // Stale token despite expiry check — refresh once and retry
-                    creds = try API.refreshToken(creds)
-                    try? Keychain.writeCredentials(creds)
-                    windows = try API.fetchUsage(accessToken: creds.accessToken)
+                    // Token rejected despite unexpired timestamp — force one
+                    // refresh and retry; if that also fails, hold last data.
+                    do {
+                        let refreshed = try API.refreshToken(creds)
+                        Keychain.writeOwnCredentials(refreshed)
+                        windows = try API.fetchUsage(accessToken: refreshed.accessToken)
+                    } catch {
+                        DispatchQueue.main.async { self.applyStale() }
+                        return
+                    }
                 }
                 // Fetch the live plan name once per launch (About panel)
                 var plan: String?
@@ -369,6 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.windows = windows
         lastUpdated = Date()
         lastError = nil
+        isStale = false
         if currentInterval != Config.pollInterval { scheduleTimer(interval: Config.pollInterval) }
         maybeNotify()
         updateUI()
@@ -376,11 +460,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyError(_ message: String, backoff: Bool) {
         lastError = message
+        isStale = false
         if backoff {
             let next = min(currentInterval * 2, Config.maxBackoff)
             scheduleTimer(interval: next)
         }
         updateUI()
+    }
+
+    /// No usable token right now (refresh failed or offline). Hold last-known
+    /// data; keep the normal 3-min poll — each cycle retries the refresh and
+    /// also picks up any newer token Claude Code has stored.
+    private func applyStale() {
+        isStale = true
+        lastError = nil
+        if currentInterval != Config.pollInterval { scheduleTimer(interval: Config.pollInterval) }
+        updateUI()
+    }
+
+    /// Utilization adjusted for windows whose reset time has already passed
+    /// while our data was stale — locally we know they're back to 0%.
+    private func effectiveUtilization(_ w: UsageWindow) -> Double {
+        if isStale, let resets = w.resetsAt, resets < Date() { return 0 }
+        return w.utilization
     }
 
     // MARK: UI
@@ -392,13 +494,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateUI() {
         guard let button = statusItem.button else { return }
         if let session = sessionWindow {
-            button.image = Self.gaugeIcon(percent: session.utilization, stale: lastError != nil)
+            button.image = Self.gaugeIcon(percent: effectiveUtilization(session),
+                                          stale: isStale || lastError != nil)
             button.title = ""
             button.imagePosition = .imageOnly
         } else {
             button.image = nil
             button.imagePosition = .noImage
-            button.title = lastError != nil ? "◔ ⚠︎" : "◔ …"
+            button.title = (isStale || lastError != nil) ? "◔ ⚠︎" : "◔ …"
         }
         statusItem.menu = buildMenu()
     }
@@ -434,7 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 arc.stroke()
             }
 
-            let text = (stale ? "!" : "\(Int(percent.rounded()))") as NSString
+            let text = "\(Int(percent.rounded()))" as NSString
             let fontSize: CGFloat = percent >= 99.5 && !stale ? 7 : 8.5
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: fontSize, weight: .bold),
@@ -462,18 +565,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(disabledItem("Loading usage…"))
         }
         for w in windows {
+            let value = effectiveUtilization(w)
+            let didReset = isStale && value == 0 && w.utilization != 0
             var color = NSColor.labelColor
-            if w.utilization >= Config.dangerThreshold { color = .systemRed }
-            else if w.utilization >= Config.warnThreshold { color = .systemOrange }
+            if value >= Config.dangerThreshold { color = .systemRed }
+            else if value >= Config.warnThreshold { color = .systemOrange }
 
             let regular = NSFont.systemFont(ofSize: 13)
             let bold = NSFont.boldSystemFont(ofSize: 13)
             let line = NSMutableAttributedString()
             line.append(NSAttributedString(string: "\(w.label): ",
                                            attributes: [.font: regular, .foregroundColor: color]))
-            line.append(NSAttributedString(string: String(format: "%.0f%%", w.utilization),
+            line.append(NSAttributedString(string: String(format: "%.0f%%", value),
                                            attributes: [.font: bold, .foregroundColor: color]))
-            if let resets = w.resetsAt {
+            if didReset {
+                line.append(NSAttributedString(string: " (Window reset)",
+                                               attributes: [.font: regular, .foregroundColor: color]))
+            } else if let resets = w.resetsAt {
                 line.append(NSAttributedString(string: " (Resets \(timeFmt.string(from: resets)))",
                                                attributes: [.font: regular, .foregroundColor: color]))
             } else if let detail = w.detail {
@@ -489,7 +597,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let updated = lastUpdated {
             let fmt = DateFormatter()
             fmt.timeStyle = .short
-            menu.addItem(disabledItem("Updated \(fmt.string(from: updated)) · every \(Int(currentInterval / 60)) min"))
+            if isStale {
+                menu.addItem(disabledItem("As of \(fmt.string(from: updated)) — reconnecting…"))
+            } else {
+                menu.addItem(disabledItem("Updated \(fmt.string(from: updated)) · every \(Int(currentInterval / 60)) min"))
+            }
+        } else if isStale {
+            menu.addItem(disabledItem("Reconnecting to Claude…"))
         }
         menu.addItem(.separator())
         menu.addItem(makeItem("Refresh Now", action: #selector(refreshNow), key: "r"))

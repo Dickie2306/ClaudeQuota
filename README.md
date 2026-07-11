@@ -35,7 +35,7 @@ cd ClaudeQuota
 open /Applications/ClaudeQuota.app
 ```
 
-On first launch, macOS will ask for permission to access the "Claude Code-credentials" Keychain item — click **Always Allow**. You may get a second prompt hours later the first time the app refreshes your OAuth token (a Keychain *write*); click **Always Allow** there too, and that's the last you'll see of them.
+On first launch, macOS will ask for permission to access the "Claude Code-credentials" Keychain item — click **Always Allow**, and that's the last you'll see of it.
 
 Then click the gauge → **Start at Login**.
 
@@ -45,8 +45,8 @@ macOS ties Keychain permissions to the app's code signature. `build.sh` signs ad
 
 ## How it works
 
-- Reads your Claude Code OAuth credentials from the macOS Keychain (item `"Claude Code-credentials"`).
-- If the access token is expired, refreshes it against Anthropic's OAuth token endpoint using Claude Code's own public client ID, and writes the new token back so Claude Code stays in sync.
+- **Strictly read-only toward your credentials**: reads your Claude Code OAuth token from the macOS Keychain (item `"Claude Code-credentials"`) and never writes, modifies, or refreshes it. Writing to that item would reset its Keychain permissions and cause repeated password prompts for Claude Code itself — so by design, Claude Code alone maintains its credential.
+- If the stored token has expired (e.g. you haven't used Claude overnight), the gauge greys out and holds the last known data with an "as of" note — and windows whose reset time has passed are shown as 0% locally. It recovers within one 3-minute poll of you using Claude again (which makes Claude Code refresh the token).
 - Polls `https://api.anthropic.com/api/oauth/usage` — the endpoint behind Claude Code's `/usage` command — every 3 minutes, backing off exponentially on HTTP 429.
 - Everything runs locally; your credentials never leave your Mac or go anywhere except Anthropic's own API.
 
