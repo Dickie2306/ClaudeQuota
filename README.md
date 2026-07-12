@@ -5,9 +5,9 @@
 ClaudeQuota is a tiny native macOS menu bar app that shows your Claude plan usage limits at a glance — the same numbers as claude.ai → Settings → Usage — without keeping a browser tab open. A color-coded ring gauge sits in your menu bar with your current 5-hour session percentage inside it; click it for the full breakdown.
 
 <p align="center">
-  <img src="Screenshots/Tool/ClaudeQuotaToolv1.0.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits" width="420">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.2.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits" width="420">
   &nbsp;&nbsp;
-  <img src="Screenshots/About/ClaudeQuotaAboutv1.0.png" alt="ClaudeQuota About panel" width="280">
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.2.png" alt="ClaudeQuota About panel" width="280">
 </p>
 
 ## Features
@@ -40,6 +40,33 @@ open /Applications/ClaudeQuota.app
 
 **First launch, without Claude Code:** the menu bar shows **◔ Sign in** — click it, choose **Sign in to Claude…**, and approve in the browser (the consent page says "Claude Code" because ClaudeQuota authenticates with the same public OAuth client the CLI uses). The tab confirms "ClaudeQuota is signed in ✓" and the gauge appears within seconds.
 
+The entire sign-in happens between **your browser and Anthropic** — ClaudeQuota never sees your password, and never asks for it. Here's the full flow, so you know exactly what to expect:
+
+<p align="center">
+  <img src="Screenshots/Auth/Auth01.png" alt="Anthropic consent page: Claude Code would like to connect to your Claude account" width="640">
+</p>
+<p align="center"><em>1. Anthropic's consent page — the app name reads "Claude Code" because ClaudeQuota uses the same public OAuth client.</em></p>
+
+<p align="center">
+  <img src="Screenshots/Auth/Auth02.png" alt="Anthropic security check: sign in again to continue" width="640">
+</p>
+<p align="center"><em>2. Anthropic may require a recent sign-in before granting access — that's their security check, not ours.</em></p>
+
+<p align="center">
+  <img src="Screenshots/Auth/Auth03.png" alt="Claude.ai login page" width="640">
+</p>
+<p align="center"><em>3. You log in on claude.ai itself — your credentials go to Anthropic only.</em></p>
+
+<p align="center">
+  <img src="Screenshots/Auth/Auth04.png" alt="Anthropic consent page shown again after login" width="640">
+</p>
+<p align="center"><em>4. Back to the consent page — click <strong>Authorize</strong>.</em></p>
+
+<p align="center">
+  <img src="Screenshots/Auth/Auth05.png" alt="Local confirmation page: ClaudeQuota is signed in" width="640">
+</p>
+<p align="center"><em>5. Done — the browser hands the authorization code back to the app, and the gauge goes live within seconds.</em></p>
+
 Then click the gauge → **Start at Login**.
 
 ### Optional: stop Keychain re-prompts across rebuilds
@@ -71,4 +98,4 @@ ClaudeQuota is an unofficial, personal-use tool and is not affiliated with or en
 
 ## License
 
-[MIT](LICENSE) — © 2026 Michael Dickerson. Built with [Claude Code](https://claude.com/claude-code).
+[MIT](LICENSE) — © 2026 [Michael Dickerson](https://michaeldickerson.dev/). Built with [Claude Code](https://claude.com/claude-code).
