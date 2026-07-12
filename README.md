@@ -5,9 +5,9 @@
 ClaudeQuota is a tiny native macOS menu bar app that shows your Claude plan usage limits at a glance — the same numbers as claude.ai → Settings → Usage — without keeping a browser tab open. A color-coded ring gauge sits in your menu bar with your current 5-hour session percentage inside it; click it for the full breakdown.
 
 <p align="center">
-  <img src="Screenshots/ClaudeQuotaTool.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits" width="420">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.0.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits" width="420">
   &nbsp;&nbsp;
-  <img src="Screenshots/ClaudeQuotaAbout.png" alt="ClaudeQuota About panel" width="280">
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.0.png" alt="ClaudeQuota About panel" width="280">
 </p>
 
 ## Features
@@ -18,12 +18,13 @@ ClaudeQuota is a tiny native macOS menu bar app that shows your Claude plan usag
 - **Extra Usage support** — if you enable Anthropic's paid overage credits, a monthly credits row appears automatically
 - **Notifications** — one-time alerts when session usage crosses 80% and 95%
 - **Auto-refresh every 3 minutes** — with automatic backoff if Anthropic rate-limits, and a "last updated" line so staleness is always visible
-- **Start at Login**, no Dock icon, zero dependencies — one Swift file, ~600 lines
+- **Works with any Claude account** — sign in from the menu bar with your Claude credentials (browser OAuth), or let it connect automatically if Claude Code is installed
+- **Start at Login**, no Dock icon, zero dependencies — one Swift file
 
 ## Requirements
 
 - macOS 13 (Ventura) or later
-- [Claude Code](https://claude.com/claude-code) installed and logged in with your Claude subscription — ClaudeQuota reuses Claude Code's credentials; it has no login of its own
+- A Claude subscription (Pro or Max) — [Claude Code](https://claude.com/claude-code) is **optional**: if it's installed and logged in, ClaudeQuota connects silently from its credentials; if not, use **Sign in to Claude…** in the menu
 - Xcode Command Line Tools (`xcode-select --install`) to build
 
 ## Install
@@ -35,7 +36,9 @@ cd ClaudeQuota
 open /Applications/ClaudeQuota.app
 ```
 
-On first launch, macOS will ask for permission to access the "Claude Code-credentials" Keychain item — click **Always Allow**, and that's the last you'll see of it.
+**First launch, with Claude Code installed:** macOS asks for permission to read the "Claude Code-credentials" Keychain item — click **Always Allow** and ClaudeQuota connects on its own.
+
+**First launch, without Claude Code:** the menu bar shows **◔ Sign in** — click it, choose **Sign in to Claude…**, and approve in the browser (the consent page says "Claude Code" because ClaudeQuota authenticates with the same public OAuth client the CLI uses). The tab confirms "ClaudeQuota is signed in ✓" and the gauge appears within seconds.
 
 Then click the gauge → **Start at Login**.
 
@@ -45,8 +48,9 @@ macOS ties Keychain permissions to the app's code signature. `build.sh` signs ad
 
 ## How it works
 
-- **Strictly read-only toward your credentials**: reads your Claude Code OAuth token from the macOS Keychain (item `"Claude Code-credentials"`) and never writes, modifies, or refreshes it. Writing to that item would reset its Keychain permissions and cause repeated password prompts for Claude Code itself — so by design, Claude Code alone maintains its credential.
-- If the stored token has expired (e.g. you haven't used Claude overnight), the gauge greys out and holds the last known data with an "as of" note — and windows whose reset time has passed are shown as 0% locally. It recovers within one 3-minute poll of you using Claude again (which makes Claude Code refresh the token).
+- **Own credentials, own Keychain item**: ClaudeQuota keeps its OAuth tokens in its own Keychain item (`"ClaudeQuota-credentials"`) and refreshes them itself — a self-sustaining chain, seeded either by browser sign-in or (if present) a one-time read of Claude Code's credentials.
+- **Strictly read-only toward Claude Code**: it never writes, modifies, or refreshes the `"Claude Code-credentials"` item. Writing to it would reset its Keychain permissions and cause repeated password prompts for Claude Code itself. It's only *read* to seed or recover, so Keychain prompts are one-time events, not recurring ones.
+- If the network drops or a token refresh fails, the gauge greys out and holds the last known data with an "as of" note — windows whose reset time has passed are shown as 0% locally — and it recovers automatically on a later poll. **Sign Out…** in the menu deletes the app's stored credentials.
 - Polls `https://api.anthropic.com/api/oauth/usage` — the endpoint behind Claude Code's `/usage` command — every 3 minutes, backing off exponentially on HTTP 429.
 - Everything runs locally; your credentials never leave your Mac or go anywhere except Anthropic's own API.
 

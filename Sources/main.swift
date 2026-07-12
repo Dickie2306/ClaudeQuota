@@ -1,5 +1,7 @@
 import AppKit
+import CryptoKit
 import Foundation
+import Network
 import Security
 import ServiceManagement
 import UserNotifications
@@ -17,6 +19,15 @@ enum Config {
     static let tokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
     // Claude Code's public OAuth client ID (same one the CLI uses for refresh)
     static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    // Standalone sign-in (v1.2): the same authorize endpoint + PKCE flow the
+    // CLI's /login uses, so ClaudeQuota works without Claude Code installed.
+    static let authorizeURL = URL(string: "https://claude.ai/oauth/authorize")!
+    static let oauthScopes = "user:profile user:inference"
+    static let localCallbackPort: UInt16 = 54545 // Claude Code's registered redirect port
+    static let localRedirectURI = "http://localhost:54545/callback"
+    // Fallback when the local port is taken: Anthropic's hosted callback page
+    // displays a code the user pastes into the app.
+    static let manualRedirectURI = "https://console.anthropic.com/oauth/code/callback"
     static let pollInterval: TimeInterval = 180 // 3 minutes
     static let maxBackoff: TimeInterval = 180 * 8
     static let warnThreshold = 75.0
@@ -61,6 +72,11 @@ enum KeychainError: Error, CustomStringConvertible {
 
 enum Keychain {
     static func readCredentials() throws -> Credentials {
+        // Test hook — simulate a Mac without Claude Code installed:
+        //   defaults write com.michaeldickerson.claudequota ignoreClaudeCode -bool true
+        if UserDefaults.standard.bool(forKey: "ignoreClaudeCode") {
+            throw KeychainError.status(errSecItemNotFound)
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Config.keychainService,
@@ -129,6 +145,82 @@ enum Keychain {
             SecItemAdd(add as CFDictionary, nil)
         }
     }
+
+    static func deleteOwnCredentials() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Config.ownKeychainService,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+// MARK: - OAuth sign-in (PKCE)
+
+enum PKCE {
+    static func randomToken(_ byteCount: Int) -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        _ = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)
+        return base64URL(Data(bytes))
+    }
+
+    static func challenge(for verifier: String) -> String {
+        base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
+    }
+
+    static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// Minimal one-shot HTTP listener for the OAuth redirect: catches
+/// GET /callback?code=…&state=…, replies with a "you can close this tab"
+/// page, and hands the code to the app.
+final class CallbackServer {
+    private var listener: NWListener?
+    private let onCode: (String, String?) -> Void
+
+    init?(port: UInt16, onCode: @escaping (String, String?) -> Void) {
+        self.onCode = onCode
+        guard let nwPort = NWEndpoint.Port(rawValue: port),
+              let listener = try? NWListener(using: .tcp, on: nwPort) else { return nil }
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
+        listener.start(queue: .global(qos: .utility))
+    }
+
+    private func handle(_ conn: NWConnection) {
+        conn.start(queue: .global(qos: .utility))
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, _, _ in
+            guard let self = self else { conn.cancel(); return }
+            var code: String?
+            var state: String?
+            if let data = data, let request = String(data: data, encoding: .utf8),
+               let requestLine = request.components(separatedBy: "\r\n").first {
+                // "GET /callback?code=…&state=… HTTP/1.1"
+                let parts = requestLine.split(separator: " ")
+                if parts.count >= 2, let comps = URLComponents(string: String(parts[1])) {
+                    code = comps.queryItems?.first { $0.name == "code" }?.value
+                    state = comps.queryItems?.first { $0.name == "state" }?.value
+                }
+            }
+            let ok = code != nil
+            let html = ok
+                ? "<html><body style=\"font-family:-apple-system,sans-serif;text-align:center;margin-top:20vh\"><h2>ClaudeQuota is signed in ✓</h2><p>You can close this tab.</p></body></html>"
+                : "<html><body style=\"font-family:-apple-system,sans-serif;text-align:center;margin-top:20vh\"><h2>Sign-in failed</h2><p>No authorization code received — try again from the ClaudeQuota menu.</p></body></html>"
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
+            conn.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in conn.cancel() })
+            if let code = code { self.onCode(code, state) }
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+    }
 }
 
 // MARK: - API client (synchronous helpers, called off the main thread)
@@ -189,6 +281,36 @@ enum API {
         let expiresIn = (json["expires_in"] as? Double) ?? 28800
         updated.expiresAt = (Date().timeIntervalSince1970 + expiresIn) * 1000
         return updated
+    }
+
+    /// Exchange an authorization code (from the browser sign-in) for tokens.
+    static func exchangeCode(_ code: String, verifier: String, redirectURI: String,
+                             state: String?) throws -> Credentials {
+        var body: [String: Any] = [
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirectURI,
+            "client_id": Config.clientID,
+            "code_verifier": verifier,
+        ]
+        if let state = state { body["state"] = state }
+        var req = URLRequest(url: Config.tokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (status, data) = try send(req)
+        guard status == 200 else {
+            throw APIError.http(status, String(data: data, encoding: .utf8) ?? "")
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let access = json["access_token"] as? String,
+              let refresh = json["refresh_token"] as? String else {
+            throw APIError.parse
+        }
+        let expiresIn = (json["expires_in"] as? Double) ?? 28800
+        return Credentials(accessToken: access, refreshToken: refresh,
+                           expiresAt: (Date().timeIntervalSince1970 + expiresIn) * 1000,
+                           raw: [:], wrapped: false)
     }
 
     static func fetchUsage(accessToken: String) throws -> [UsageWindow] {
@@ -333,6 +455,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notificationsAvailable = false
     private var planName: String?
     private var isStale = false
+    private var isSignedOut = false
+    private var signInVerifier: String?
+    private var signInState: String?
+    private var callbackServer: CallbackServer?
     private let queue = DispatchQueue(label: "usage-poller", qos: .utility)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -409,8 +535,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let creds: Credentials
                 do {
                     creds = try self.obtainCredentials()
-                } catch let err as KeychainError {
-                    DispatchQueue.main.async { self.applyError("\(err)", backoff: false) }
+                } catch is KeychainError {
+                    // No credentials anywhere — needs interactive sign-in.
+                    DispatchQueue.main.async { self.applySignedOut() }
                     return
                 } catch APIError.http(429, _) {
                     DispatchQueue.main.async { self.applyError("Rate limited — backing off", backoff: true) }
@@ -456,6 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastUpdated = Date()
         lastError = nil
         isStale = false
+        isSignedOut = false
         if currentInterval != Config.pollInterval { scheduleTimer(interval: Config.pollInterval) }
         maybeNotify()
         updateUI()
@@ -478,6 +606,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isStale = true
         lastError = nil
         if currentInterval != Config.pollInterval { scheduleTimer(interval: Config.pollInterval) }
+        updateUI()
+    }
+
+    /// No credentials exist at all (fresh Mac, or signed out with no Claude
+    /// Code install). The menu offers interactive sign-in; polling continues
+    /// so an appearing Claude Code credential is still picked up.
+    private func applySignedOut() {
+        isSignedOut = true
+        isStale = false
+        lastError = nil
+        windows = []
+        lastUpdated = nil
         updateUI()
     }
 
@@ -504,7 +644,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             button.image = nil
             button.imagePosition = .noImage
-            button.title = (isStale || lastError != nil) ? "◔ ⚠︎" : "◔ …"
+            if isSignedOut {
+                button.title = "◔ Sign in"
+            } else {
+                button.title = (isStale || lastError != nil) ? "◔ ⚠︎" : "◔ …"
+            }
         }
         statusItem.menu = buildMenu()
     }
@@ -564,7 +708,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let timeFmt = DateFormatter()
         timeFmt.dateFormat = "EEE h:mm a"
 
-        if windows.isEmpty && lastError == nil {
+        if isSignedOut {
+            menu.addItem(disabledItem("Sign in to see your Claude usage"))
+            menu.addItem(makeItem("Sign in to Claude…", action: #selector(signIn), key: ""))
+        } else if windows.isEmpty && lastError == nil {
             menu.addItem(disabledItem("Loading usage…"))
         }
         for w in windows {
@@ -617,6 +764,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             login.isEnabled = false
         }
         menu.addItem(login)
+        if Keychain.readOwnCredentials() != nil {
+            menu.addItem(makeItem("Sign Out…", action: #selector(signOut), key: ""))
+        }
         menu.addItem(.separator())
         menu.addItem(makeItem("About ClaudeQuota", action: #selector(showAbout), key: ""))
         menu.addItem(makeItem("Quit", action: #selector(quit), key: "q"))
@@ -736,6 +886,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
         }
         statusItem.menu = buildMenu()
+    }
+
+    // MARK: Sign-in / sign-out
+
+    @objc func signIn() {
+        let verifier = PKCE.randomToken(64)
+        let state = PKCE.randomToken(32)
+        signInVerifier = verifier
+        signInState = state
+        callbackServer?.stop()
+
+        if let server = CallbackServer(port: Config.localCallbackPort, onCode: { [weak self] code, returnedState in
+            DispatchQueue.main.async {
+                self?.completeSignIn(code: code, returnedState: returnedState,
+                                     redirectURI: Config.localRedirectURI)
+            }
+        }) {
+            callbackServer = server
+            openAuthorizePage(redirectURI: Config.localRedirectURI, manualCode: false,
+                              challenge: PKCE.challenge(for: verifier), state: state)
+        } else {
+            // Local port unavailable — Anthropic's hosted callback page shows a
+            // code the user pastes in.
+            openAuthorizePage(redirectURI: Config.manualRedirectURI, manualCode: true,
+                              challenge: PKCE.challenge(for: verifier), state: state)
+            promptForPastedCode()
+        }
+    }
+
+    private func openAuthorizePage(redirectURI: String, manualCode: Bool,
+                                   challenge: String, state: String) {
+        var comps = URLComponents(url: Config.authorizeURL, resolvingAgainstBaseURL: false)!
+        var items = [
+            URLQueryItem(name: "client_id", value: Config.clientID),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "scope", value: Config.oauthScopes),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "state", value: state),
+        ]
+        if manualCode { items.insert(URLQueryItem(name: "code", value: "true"), at: 0) }
+        comps.queryItems = items
+        if let url = comps.url { NSWorkspace.shared.open(url) }
+    }
+
+    private func promptForPastedCode() {
+        let alert = NSAlert()
+        alert.messageText = "Paste your sign-in code"
+        alert.informativeText = "After approving in the browser, copy the code shown and paste it here."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.placeholderString = "code#state"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Sign In")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // The hosted callback page displays "authorizationCode#state".
+        let parts = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "#", maxSplits: 1).map(String.init)
+        guard let code = parts.first, !code.isEmpty else { return }
+        completeSignIn(code: code, returnedState: parts.count > 1 ? parts[1] : nil,
+                       redirectURI: Config.manualRedirectURI)
+    }
+
+    private func completeSignIn(code: String, returnedState: String?, redirectURI: String) {
+        callbackServer?.stop()
+        callbackServer = nil
+        guard let verifier = signInVerifier else { return }
+        if let expected = signInState, let returned = returnedState, returned != expected {
+            showSignInError("Sign-in state mismatch — please try again.")
+            return
+        }
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let creds = try API.exchangeCode(code, verifier: verifier,
+                                                 redirectURI: redirectURI, state: returnedState)
+                Keychain.writeOwnCredentials(creds)
+                DispatchQueue.main.async {
+                    self.signInVerifier = nil
+                    self.signInState = nil
+                    self.isSignedOut = false
+                    self.refreshNow()
+                }
+            } catch {
+                DispatchQueue.main.async { self.showSignInError("\(error)") }
+            }
+        }
+    }
+
+    private func showSignInError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Sign-in failed"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    @objc func signOut() {
+        let alert = NSAlert()
+        alert.messageText = "Sign out of ClaudeQuota?"
+        alert.informativeText = "This removes the credentials ClaudeQuota stores for itself. If Claude Code is installed and signed in, ClaudeQuota will reconnect from its credentials on the next poll."
+        alert.addButton(withTitle: "Sign Out")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Keychain.deleteOwnCredentials()
+        planName = nil
+        notifiedThresholds = []
+        applySignedOut()
+        refresh() // reconnects via Claude Code if present; otherwise stays signed out
     }
 
     @objc func quit() { NSApp.terminate(nil) }
