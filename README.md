@@ -18,14 +18,16 @@ ClaudeQuota is a tiny native macOS menu bar app that shows your Claude plan usag
 - **Extra Usage support** — if you enable Anthropic's paid overage credits, a monthly credits row appears automatically
 - **Notifications** — one-time alerts when session usage crosses 80% and 95%
 - **Auto-refresh every 3 minutes** — with automatic backoff if Anthropic rate-limits, and a "last updated" line so staleness is always visible
-- **Works with any Claude account** — sign in from the menu bar with your Claude credentials (browser OAuth), or let it connect automatically if Claude Code is installed
+- **Works with any Claude account** — sign in from the menu bar with your Claude credentials (browser OAuth), or let it connect automatically if the Claude Code coding tool is installed
 - **Start at Login**, no Dock icon, zero dependencies — one Swift file
 
 ## Requirements
 
 - macOS 13 (Ventura) or later
-- A Claude subscription (Pro or Max) — [Claude Code](https://claude.com/claude-code) is **optional**: if it's installed and logged in, ClaudeQuota connects silently from its credentials; if not, use **Sign in to Claude…** in the menu
+- A Claude subscription (Pro or Max) — that's it. It doesn't matter how you use Claude (website, desktop app, or Claude Code); ClaudeQuota can always sign in on its own
 - Xcode Command Line Tools (`xcode-select --install`) to build
+
+> **"Claude Code" vs. the Claude desktop app — an important distinction.** Throughout this README, *Claude Code* means Anthropic's coding tool (the `claude` terminal/IDE agent) — **not** the Claude desktop chat app and not claude.ai in a browser. Only Claude Code stores credentials in the macOS Keychain where ClaudeQuota can borrow them for a silent, zero-setup connection. The desktop app and website keep their credentials to themselves — if that's how you use Claude, just click **Sign in to Claude…** in the menu instead. Same result either way.
 
 ## Install
 
@@ -36,9 +38,9 @@ cd ClaudeQuota
 open /Applications/ClaudeQuota.app
 ```
 
-**First launch, with Claude Code installed:** macOS asks for permission to read the "Claude Code-credentials" Keychain item — click **Always Allow** and ClaudeQuota connects on its own.
+**First launch, with the Claude Code coding tool installed and logged in:** macOS asks for permission to read the "Claude Code-credentials" Keychain item — click **Always Allow** and ClaudeQuota connects on its own. No sign-in needed.
 
-**First launch, without Claude Code:** the menu bar shows **◔ Sign in** — click it, choose **Sign in to Claude…**, and approve in the browser (the consent page says "Claude Code" because ClaudeQuota authenticates with the same public OAuth client the CLI uses). The tab confirms "ClaudeQuota is signed in ✓" and the gauge appears within seconds.
+**First launch for everyone else** (you use Claude via the website or the desktop chat app): the menu bar shows **◔ Sign in** — click it, choose **Sign in to Claude…**, and approve in the browser (the consent page says "Claude Code" because ClaudeQuota authenticates with the same public OAuth client Anthropic's CLI uses). The tab confirms "ClaudeQuota is signed in ✓" and the gauge appears within seconds.
 
 The entire sign-in happens between **your browser and Anthropic** — ClaudeQuota never sees your password, and never asks for it. Here's the full flow, so you know exactly what to expect:
 
