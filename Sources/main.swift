@@ -180,16 +180,72 @@ enum PKCE {
 /// GET /callback?code=…&state=…, replies with a "you can close this tab"
 /// page, and hands the code to the app.
 final class CallbackServer {
+    enum Status { case ready, failed }
+
     private var listener: NWListener?
     private let onCode: (String, String?) -> Void
+    private let onStatus: (Status) -> Void
+    private let lock = NSLock()
+    private var hasBeenReady = false
+    private var isFinished = false // failed or stopped: no further status callbacks
+    private var startupTimer: DispatchWorkItem?
 
-    init?(port: UInt16, onCode: @escaping (String, String?) -> Void) {
+    /// `onStatus` fires from a background queue: `.ready` once the port is
+    /// really accepting connections, `.failed` if it never opens in time or
+    /// later dies. Creating an NWListener doesn't throw for a busy port — the
+    /// failure only shows up in its state updates — so callers must wait for
+    /// `.ready` before pointing a browser at it.
+    init?(port: UInt16, onCode: @escaping (String, String?) -> Void,
+          onStatus: @escaping (Status) -> Void) {
         self.onCode = onCode
+        self.onStatus = onStatus
+        // Loopback only: the redirect comes from a browser on this Mac, so
+        // there is no reason to accept connections from the network.
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = .loopback
         guard let nwPort = NWEndpoint.Port(rawValue: port),
-              let listener = try? NWListener(using: .tcp, on: nwPort) else { return nil }
+              let listener = try? NWListener(using: params, on: nwPort) else { return nil }
         self.listener = listener
         listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .ready: self.markReady()
+            case .failed: self.fail()
+            case .waiting: if !self.hasBeenReadySnapshot() { self.fail() }
+            default: break
+            }
+        }
+        let timer = DispatchWorkItem { [weak self] in
+            if let self = self, !self.hasBeenReadySnapshot() { self.fail() }
+        }
+        startupTimer = timer
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2, execute: timer)
         listener.start(queue: .global(qos: .utility))
+    }
+
+    private func hasBeenReadySnapshot() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return hasBeenReady
+    }
+
+    private func markReady() {
+        lock.lock()
+        if isFinished || hasBeenReady { lock.unlock(); return }
+        hasBeenReady = true
+        lock.unlock()
+        startupTimer?.cancel()
+        onStatus(.ready)
+    }
+
+    private func fail() {
+        lock.lock()
+        if isFinished { lock.unlock(); return }
+        isFinished = true
+        lock.unlock()
+        startupTimer?.cancel()
+        listener?.cancel()
+        onStatus(.failed)
     }
 
     private func handle(_ conn: NWConnection) {
@@ -218,6 +274,10 @@ final class CallbackServer {
     }
 
     func stop() {
+        lock.lock()
+        isFinished = true // an intentional stop must not look like a failure
+        lock.unlock()
+        startupTimer?.cancel()
         listener?.cancel()
         listener = nil
     }
@@ -896,23 +956,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         signInVerifier = verifier
         signInState = state
         callbackServer?.stop()
+        callbackServer = nil
 
-        if let server = CallbackServer(port: Config.localCallbackPort, onCode: { [weak self] code, returnedState in
+        // The browser opens only once the listener reports it is really
+        // accepting connections; if it never opens, or dies mid sign-in,
+        // fall back to Anthropic's hosted page that shows a code to paste.
+        let server = CallbackServer(port: Config.localCallbackPort, onCode: { [weak self] code, returnedState in
             DispatchQueue.main.async {
                 self?.completeSignIn(code: code, returnedState: returnedState,
                                      redirectURI: Config.localRedirectURI)
             }
-        }) {
-            callbackServer = server
-            openAuthorizePage(redirectURI: Config.localRedirectURI, manualCode: false,
-                              challenge: PKCE.challenge(for: verifier), state: state)
-        } else {
-            // Local port unavailable — Anthropic's hosted callback page shows a
-            // code the user pastes in.
-            openAuthorizePage(redirectURI: Config.manualRedirectURI, manualCode: true,
-                              challenge: PKCE.challenge(for: verifier), state: state)
-            promptForPastedCode()
+        }, onStatus: { [weak self] status in
+            DispatchQueue.main.async {
+                // Ignore events from a superseded or already-finished attempt.
+                guard let self = self, self.signInState == state else { return }
+                switch status {
+                case .ready:
+                    self.openAuthorizePage(redirectURI: Config.localRedirectURI, manualCode: false,
+                                           challenge: PKCE.challenge(for: verifier), state: state)
+                case .failed:
+                    self.fallBackToManualSignIn(verifier: verifier, state: state)
+                }
+            }
+        })
+        guard let server = server else {
+            fallBackToManualSignIn(verifier: verifier, state: state)
+            return
         }
+        callbackServer = server
+        // Don't leave a listener open forever if sign-in is abandoned.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 600) { [weak self, weak server] in
+            guard let self = self, let server = server, self.callbackServer === server else { return }
+            server.stop()
+            self.callbackServer = nil
+        }
+    }
+
+    private func fallBackToManualSignIn(verifier: String, state: String) {
+        callbackServer?.stop()
+        callbackServer = nil
+        openAuthorizePage(redirectURI: Config.manualRedirectURI, manualCode: true,
+                          challenge: PKCE.challenge(for: verifier), state: state)
+        promptForPastedCode()
     }
 
     private func openAuthorizePage(redirectURI: String, manualCode: Bool,
@@ -934,8 +1019,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func promptForPastedCode() {
         let alert = NSAlert()
-        alert.messageText = "Paste your sign-in code"
-        alert.informativeText = "After approving in the browser, copy the code shown and paste it here."
+        alert.messageText = "Finish signing in with a code"
+        alert.informativeText = """
+            ClaudeQuota couldn't start its automatic sign-in, so this takes three steps:
+
+            1. Go to the browser tab that just opened and click Authorize.
+            2. Click Copy code on the page that follows.
+            3. Come back here, paste the code, and click Sign In.
+
+            (If this window is covering the browser, drag it aside.)
+            """
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
         field.placeholderString = "code#state"
         alert.accessoryView = field

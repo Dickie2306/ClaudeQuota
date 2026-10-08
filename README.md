@@ -69,6 +69,8 @@ The entire sign-in happens between **your browser and Anthropic** — ClaudeQuot
 </p>
 <p align="center"><em>5. Done — the browser hands the authorization code back to the app, and the gauge goes live within seconds.</em></p>
 
+If the automatic return ever fails (for example, another program is using the local port), ClaudeQuota notices and switches to a code-paste dialog instead of leaving you at a dead end: approve in the browser, click **Copy code**, and paste it into ClaudeQuota.
+
 Then click the gauge → **Start at Login**.
 
 ### Optional: stop Keychain re-prompts across rebuilds
@@ -82,6 +84,7 @@ macOS ties Keychain permissions to the app's code signature. `build.sh` signs ad
 - If the network drops or a token refresh briefly fails, the gauge greys out and holds the last known data with an "as of" note — windows whose reset time has passed are shown as 0% locally — and it recovers automatically on a later poll. **Sign Out…** in the menu deletes the app's stored credentials.
 - **If the gauge stays grey and never recovers:** your sign-in session has probably expired for good — for example, the app went unused for roughly a month, or you revoked its access. It can't renew that on its own. Choose **Sign Out…** from the menu, then **Sign in to Claude…** to sign in again.
 - Polls `https://api.anthropic.com/api/oauth/usage` — the endpoint behind Claude Code's `/usage` command — every 3 minutes, backing off exponentially on HTTP 429.
+- The sign-in listener only accepts connections from your own Mac, and only while a sign-in is in progress. It closes itself after 10 minutes if you walk away.
 - Everything runs locally; your credentials never leave your Mac or go anywhere except Anthropic's own API.
 
 > **Note:** the usage endpoint is undocumented and could change. The app fails soft (shows ⚠︎ with last known data). If it breaks, check `parseWindows` in `Sources/main.swift` against the current response shape.
