@@ -79,7 +79,8 @@ macOS ties Keychain permissions to the app's code signature. `build.sh` signs ad
 
 - **Own credentials, own Keychain item**: ClaudeQuota keeps its OAuth tokens in its own Keychain item (`"ClaudeQuota-credentials"`) and refreshes them itself — a self-sustaining chain, seeded either by browser sign-in or (if present) a one-time read of Claude Code's credentials.
 - **Strictly read-only toward Claude Code**: it never writes, modifies, or refreshes the `"Claude Code-credentials"` item. Writing to it would reset its Keychain permissions and cause repeated password prompts for Claude Code itself. It's only *read* to seed or recover, so Keychain prompts are one-time events, not recurring ones.
-- If the network drops or a token refresh fails, the gauge greys out and holds the last known data with an "as of" note — windows whose reset time has passed are shown as 0% locally — and it recovers automatically on a later poll. **Sign Out…** in the menu deletes the app's stored credentials.
+- If the network drops or a token refresh briefly fails, the gauge greys out and holds the last known data with an "as of" note — windows whose reset time has passed are shown as 0% locally — and it recovers automatically on a later poll. **Sign Out…** in the menu deletes the app's stored credentials.
+- **If the gauge stays grey and never recovers:** your sign-in session has probably expired for good — for example, the app went unused for roughly a month, or you revoked its access. It can't renew that on its own. Choose **Sign Out…** from the menu, then **Sign in to Claude…** to sign in again.
 - Polls `https://api.anthropic.com/api/oauth/usage` — the endpoint behind Claude Code's `/usage` command — every 3 minutes, backing off exponentially on HTTP 429.
 - Everything runs locally; your credentials never leave your Mac or go anywhere except Anthropic's own API.
 
