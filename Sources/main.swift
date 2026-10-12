@@ -28,6 +28,8 @@ enum Config {
     // Fallback when the local port is taken: Anthropic's hosted callback page
     // displays a code the user pastes into the app.
     static let manualRedirectURI = "https://console.anthropic.com/oauth/code/callback"
+    static let usagePageURL = URL(string: "https://claude.ai/settings/usage")!
+    static let menuWidth: CGFloat = 300
     static let pollInterval: TimeInterval = 180 // 3 minutes
     static let maxBackoff: TimeInterval = 180 * 8
     static let warnThreshold = 75.0
@@ -502,9 +504,128 @@ enum API {
     }
 }
 
+// MARK: - Menu views
+//
+// Menu-item views need explicit frames — Auto Layout alone yields a
+// zero-height row. All views are flipped so layout reads top-down.
+
+/// Thin rounded progress bar: a faint track with a colored fill.
+final class UsageBarView: NSView {
+    var percent: Double
+    var fillColor: NSColor
+
+    init(frame: NSRect, percent: Double, fillColor: NSColor) {
+        self.percent = percent
+        self.fillColor = fillColor
+        super.init(frame: frame)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var isFlipped: Bool { true }
+
+    /// Faint empty-track color, explicit per appearance so it stays subtle
+    /// in both light and dark menus.
+    private static let trackColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.16)
+            : NSColor(white: 0, alpha: 0.12)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        Self.trackColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let clamped = min(max(percent, 0), 100)
+        guard clamped > 0 else { return }
+        // Never narrower than the bar is tall, so a small value still reads as a dot.
+        let width = max(bounds.height, bounds.width * CGFloat(clamped) / 100)
+        let fill = NSRect(x: 0, y: 0, width: width, height: bounds.height)
+        fillColor.setFill()
+        NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+/// One usage row: label left, value right, progress bar, then a caption.
+final class UsageRowView: NSView {
+    override var isFlipped: Bool { true }
+
+    init(width: CGFloat, label: String, value: String, valueColor: NSColor,
+         percent: Double, barColor: NSColor, caption: String?) {
+        let padX: CGFloat = 14
+        let height: CGFloat = caption == nil ? 41 : 58
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
+
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = .systemFont(ofSize: 13)
+        labelField.sizeToFit()
+        labelField.setFrameOrigin(NSPoint(x: padX, y: 6))
+        addSubview(labelField)
+
+        let valueField = NSTextField(labelWithString: value)
+        valueField.font = .boldSystemFont(ofSize: 13)
+        valueField.textColor = valueColor
+        valueField.sizeToFit()
+        valueField.setFrameOrigin(NSPoint(x: width - padX - valueField.frame.width, y: 6))
+        addSubview(valueField)
+
+        addSubview(UsageBarView(frame: NSRect(x: padX, y: 28, width: width - 2 * padX, height: 5),
+                                percent: percent, fillColor: barColor))
+
+        if let caption = caption {
+            let captionField = NSTextField(labelWithString: caption)
+            captionField.font = .systemFont(ofSize: 11)
+            captionField.textColor = .secondaryLabelColor
+            captionField.sizeToFit()
+            captionField.setFrameOrigin(NSPoint(x: padX, y: 37))
+            addSubview(captionField)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+/// Title row: app name on the left, secondary detail (the version) on the right.
+final class MenuHeaderView: NSView {
+    override var isFlipped: Bool { true }
+
+    init(width: CGFloat, title: String, detail: String) {
+        let padX: CGFloat = 14
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 26))
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.font = .boldSystemFont(ofSize: 13)
+        titleField.sizeToFit()
+        titleField.setFrameOrigin(NSPoint(x: padX, y: 5))
+        addSubview(titleField)
+
+        let detailField = NSTextField(labelWithString: detail)
+        detailField.font = .systemFont(ofSize: 11)
+        detailField.textColor = .secondaryLabelColor
+        detailField.sizeToFit()
+        detailField.setFrameOrigin(NSPoint(x: width - padX - detailField.frame.width, y: 7))
+        addSubview(detailField)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+/// Small secondary section label, e.g. "Plan Level · Pro".
+final class MenuSectionLabelView: NSView {
+    override var isFlipped: Bool { true }
+
+    init(width: CGFloat, text: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 22))
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: 11)
+        field.textColor = .secondaryLabelColor
+        field.sizeToFit()
+        field.setFrameOrigin(NSPoint(x: 14, y: 3))
+        addSubview(field)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
 // MARK: - App delegate
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private var currentInterval = Config.pollInterval
@@ -589,6 +710,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
+        if let preview = UserDefaults.standard.string(forKey: "previewState") {
+            DispatchQueue.main.async { [weak self] in self?.applyPreview(preview) }
+            return
+        }
         queue.async { [weak self] in
             guard let self = self else { return }
             do {
@@ -705,7 +830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = nil
             button.imagePosition = .noImage
             if isSignedOut {
-                button.title = "◔ Sign in"
+                button.title = "◔ Sign In"
             } else {
                 button.title = (isStale || lastError != nil) ? "◔ ⚠︎" : "◔ …"
             }
@@ -765,40 +890,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (even with attributed titles), so info rows are kept "enabled"
         // with no action to render at full strength.
         menu.autoenablesItems = false
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "EEE h:mm a"
+        // Rebuilt on every open (menuNeedsUpdate) so the relative reset
+        // times are never stale between polls.
+        menu.delegate = self
+        populate(menu)
+        return menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        populate(menu)
+    }
+
+    private func populate(_ menu: NSMenu) {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        menu.addItem(viewItem(MenuHeaderView(width: Config.menuWidth, title: "ClaudeQuota", detail: "v\(version)")))
 
         if isSignedOut {
             menu.addItem(disabledItem("Sign in to see your Claude usage"))
-            menu.addItem(makeItem("Sign in to Claude…", action: #selector(signIn), key: ""))
+            menu.addItem(makeItem("Sign In", action: #selector(signIn), key: ""))
         } else if windows.isEmpty && lastError == nil {
             menu.addItem(disabledItem("Loading usage…"))
+        } else if !windows.isEmpty, let plan = planName {
+            menu.addItem(viewItem(MenuSectionLabelView(width: Config.menuWidth, text: "Plan Level · \(plan)")))
         }
         for w in windows {
-            let value = effectiveUtilization(w)
-            let didReset = isStale && value == 0 && w.utilization != 0
-            var color = NSColor.labelColor
-            if value >= Config.dangerThreshold { color = .systemRed }
-            else if value >= Config.warnThreshold { color = .systemOrange }
-
-            let regular = NSFont.systemFont(ofSize: 13)
-            let bold = NSFont.boldSystemFont(ofSize: 13)
-            let line = NSMutableAttributedString()
-            line.append(NSAttributedString(string: "\(w.label): ",
-                                           attributes: [.font: regular, .foregroundColor: color]))
-            line.append(NSAttributedString(string: String(format: "%.0f%%", value),
-                                           attributes: [.font: bold, .foregroundColor: color]))
-            if didReset {
-                line.append(NSAttributedString(string: " (Window reset)",
-                                               attributes: [.font: regular, .foregroundColor: color]))
-            } else if let resets = w.resetsAt {
-                line.append(NSAttributedString(string: " (Resets \(timeFmt.string(from: resets)))",
-                                               attributes: [.font: regular, .foregroundColor: color]))
-            } else if let detail = w.detail {
-                line.append(NSAttributedString(string: " (\(detail))",
-                                               attributes: [.font: regular, .foregroundColor: color]))
-            }
-            menu.addItem(infoRow(line))
+            menu.addItem(viewItem(usageRow(w)))
         }
         menu.addItem(.separator())
         if let err = lastError {
@@ -816,6 +933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(disabledItem("Reconnecting to Claude…"))
         }
         menu.addItem(.separator())
+        menu.addItem(makeItem("Open Usage Page", action: #selector(openUsagePage), key: ""))
         menu.addItem(makeItem("Refresh Now", action: #selector(refreshNow), key: "r"))
         let login = makeItem("Start at Login", action: #selector(toggleLogin), key: "")
         if #available(macOS 13.0, *) {
@@ -825,12 +943,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(login)
         if Keychain.readOwnCredentials() != nil {
-            menu.addItem(makeItem("Sign Out…", action: #selector(signOut), key: ""))
+            menu.addItem(makeItem("Sign Out", action: #selector(signOut), key: ""))
         }
         menu.addItem(.separator())
-        menu.addItem(makeItem("About ClaudeQuota", action: #selector(showAbout), key: ""))
+        menu.addItem(makeItem("About", action: #selector(showAbout), key: ""))
         menu.addItem(makeItem("Quit", action: #selector(quit), key: "q"))
-        return menu
+    }
+
+    /// One usage row with a color-coded progress bar (same thresholds as the
+    /// menu bar ring; grey while the data is stale).
+    private func usageRow(_ w: UsageWindow) -> NSView {
+        let value = effectiveUtilization(w)
+        let didReset = isStale && value == 0 && w.utilization != 0
+
+        var barColor = NSColor.systemGreen
+        var valueColor = NSColor.labelColor
+        if value >= Config.dangerThreshold { barColor = .systemRed; valueColor = .systemRed }
+        else if value >= Config.warnThreshold { barColor = .systemOrange; valueColor = .systemOrange }
+        if isStale { barColor = .systemGray; valueColor = .secondaryLabelColor }
+
+        var caption: String?
+        if didReset {
+            caption = "Window reset"
+        } else if let resets = w.resetsAt {
+            caption = Self.resetCaption(resets)
+        } else if let detail = w.detail {
+            caption = detail
+        }
+        return UsageRowView(width: Config.menuWidth, label: w.label,
+                            value: String(format: "%.0f%%", value), valueColor: valueColor,
+                            percent: value, barColor: barColor, caption: caption)
+    }
+
+    /// "Resets in 4h 28m · 4:10 PM" within a day, "Resets Wed 8:00 AM · in 4d 20h" beyond.
+    private static func resetCaption(_ date: Date) -> String {
+        let remaining = date.timeIntervalSinceNow
+        guard remaining > 0 else { return "Resets now" }
+        let relative = relativeDuration(remaining)
+        let fmt = DateFormatter()
+        if remaining < 24 * 3600 {
+            fmt.dateFormat = "h:mm a"
+            return "Resets in \(relative) · \(fmt.string(from: date))"
+        }
+        fmt.dateFormat = "EEE h:mm a"
+        return "Resets \(fmt.string(from: date)) · in \(relative)"
+    }
+
+    private static func relativeDuration(_ seconds: TimeInterval) -> String {
+        let totalMinutes = max(Int(seconds / 60), 0)
+        let days = totalMinutes / 1440
+        let hours = (totalMinutes % 1440) / 60
+        let minutes = totalMinutes % 60
+        if days >= 1 { return "\(days)d \(hours)h" }
+        if hours >= 1 { return "\(hours)h \(minutes)m" }
+        return "\(max(minutes, 1))m"
+    }
+
+    @objc func openUsagePage() {
+        NSWorkspace.shared.open(Config.usagePageURL)
+    }
+
+    /// Visual-testing hook — render fixed sample data instead of polling:
+    ///   defaults write com.michaeldickerson.claudequota previewState -string warning
+    /// (normal | warning | danger | stale; delete the key to go back to live data).
+    private func applyPreview(_ state: String) {
+        let now = Date()
+        let session: Double, weekly: Double
+        switch state {
+        case "warning": (session, weekly) = (82, 76)
+        case "danger": (session, weekly) = (96, 91)
+        default: (session, weekly) = (7, 10)
+        }
+        windows = [
+            UsageWindow(key: "five_hour", label: "Session (5-hr)", utilization: session,
+                        resetsAt: now.addingTimeInterval(4 * 3600 + 28 * 60)),
+            UsageWindow(key: "weekly_all", label: "Weekly (All)", utilization: weekly,
+                        resetsAt: now.addingTimeInterval(4 * 86400 + 20 * 3600)),
+        ]
+        planName = planName ?? "Pro"
+        lastUpdated = now
+        lastError = nil
+        isSignedOut = false
+        isStale = state == "stale"
+        updateUI()
     }
 
     @objc func showAbout() {
@@ -885,17 +1080,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Non-interactive info row rendered at full strength — a custom-view
     /// menu item (like Apple's Wi-Fi/Battery info rows): no dimming, no
     /// hover highlight, not clickable.
-    private func infoRow(_ text: NSAttributedString) -> NSMenuItem {
-        let label = NSTextField(labelWithAttributedString: text)
-        label.sizeToFit()
-        let size = label.frame.size
-        // Menu-item views need explicit frames — Auto Layout alone yields a
-        // zero-height row.
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: size.width + 28, height: size.height + 6))
-        label.setFrameOrigin(NSPoint(x: 14, y: 3))
-        container.addSubview(label)
+    private func viewItem(_ view: NSView) -> NSMenuItem {
         let item = NSMenuItem()
-        item.view = container
+        item.view = view
         return item
     }
 
