@@ -5,9 +5,9 @@
 ClaudeQuota is a tiny native macOS menu bar app that shows your Claude plan usage limits at a glance — the same numbers as claude.ai → Settings → Usage — without keeping a browser tab open. A color-coded ring gauge sits in your menu bar with your current 5-hour session percentage inside it; click it for the full breakdown.
 
 <p align="center">
-  <img src="Screenshots/Tool/ClaudeQuotaToolv1.2.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits" width="420">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.3.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits with progress bars" width="320">
   &nbsp;&nbsp;
-  <img src="Screenshots/About/ClaudeQuotaAboutv1.2.png" alt="ClaudeQuota About panel" width="280">
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.3.png" alt="ClaudeQuota About panel" width="280">
 </p>
 
 ## Features
@@ -100,6 +100,73 @@ Constants at the top of `Sources/main.swift` (`Config`): poll interval, color th
 
 1. Menu → **Start at Login** (toggle off), then **Quit**
 2. `rm -rf /Applications/ClaudeQuota.app`
+
+## History
+
+Every release, newest first, with the screenshots from that version. Click a version to expand it.
+
+### v1.3 — October 12, 2026
+
+A redesigned dropdown: color-coded progress bars, reset times in both forms, a plan level line, and **Open Usage Page**.
+
+<p align="center">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.3.png" alt="ClaudeQuota v1.3 dropdown with progress bars" width="320">
+  &nbsp;&nbsp;
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.3.png" alt="ClaudeQuota v1.3 About panel" width="280">
+</p>
+
+<details>
+<summary><strong>v1.2.1 — October 8, 2026</strong></summary>
+
+Sign-in no longer dead-ends when the local listener can't open: ClaudeQuota now falls back to a code-paste dialog automatically, and the listener only accepts connections from your own Mac.
+
+Screenshots: None (no visual change to the menu or About panel).
+
+</details>
+
+<details>
+<summary><strong>v1.2 — July 12, 2026</strong></summary>
+
+Standalone **Sign in with Claude**, so Claude Code became optional. The full browser sign-in flow is shown in the [Install section](#install).
+
+<p align="center">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.2.png" alt="ClaudeQuota v1.2 dropdown" width="420">
+  &nbsp;&nbsp;
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.2.png" alt="ClaudeQuota v1.2 About panel" width="280">
+</p>
+
+</details>
+
+<details>
+<summary><strong>v1.1.1 — July 12, 2026</strong></summary>
+
+A self-sustaining token chain: ClaudeQuota polls from its own credentials and reads Claude Code's only to seed or recover.
+
+Screenshots: None (credential internals only).
+
+</details>
+
+<details>
+<summary><strong>v1.1 — July 12, 2026</strong></summary>
+
+Eliminated recurring Keychain password prompts: ClaudeQuota keeps its tokens in its own Keychain item and is strictly read-only toward Claude Code's.
+
+Screenshots: None (credential internals only).
+
+</details>
+
+<details>
+<summary><strong>v1.0 — July 8, 2026</strong></summary>
+
+The first release: live Claude usage in your macOS menu bar.
+
+<p align="center">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.0.png" alt="ClaudeQuota v1.0 dropdown" width="380">
+  &nbsp;&nbsp;
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.0.png" alt="ClaudeQuota v1.0 About panel" width="280">
+</p>
+
+</details>
 
 ## Disclaimer
 
