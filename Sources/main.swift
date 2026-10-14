@@ -29,6 +29,9 @@ enum Config {
     // displays a code the user pastes into the app.
     static let manualRedirectURI = "https://console.anthropic.com/oauth/code/callback"
     static let usagePageURL = URL(string: "https://claude.ai/settings/usage")!
+    // Month and year of the latest release, shown in the About panel.
+    // Bump this together with CFBundleShortVersionString in build.sh.
+    static let updated = "October 2026"
     static let menuWidth: CGFloat = 300
     static let pollInterval: TimeInterval = 180 // 3 minutes
     static let maxBackoff: TimeInterval = 180 * 8
@@ -927,7 +930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if isStale {
                 menu.addItem(disabledItem("As of \(fmt.string(from: updated)) — reconnecting…"))
             } else {
-                menu.addItem(disabledItem("Updated \(fmt.string(from: updated)) · every \(Int(currentInterval / 60)) min"))
+                menu.addItem(disabledItem("Updated @ \(fmt.string(from: updated)) · Every \(Int(currentInterval / 60)) Mins"))
             }
         } else if isStale {
             menu.addItem(disabledItem("Reconnecting to Claude…"))
@@ -1056,13 +1059,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         body.append(NSAttributedString(string: """
 
         Created: July 2026
+        Updated: \(Config.updated)
         Build: Swift (AppKit)
         Claude Plan: \(plan)
         Data: Anthropic Usage API
-        Quota Updated: Every \(Int(Config.pollInterval / 60)) Mins
+        Quota Refresh Cycle: Every \(Int(Config.pollInterval / 60)) Mins
         """, attributes: base))
 
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 240, height: 100))
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 240, height: 116))
         textView.textStorage?.setAttributedString(body)
         textView.isEditable = false
         textView.isSelectable = true // required for the link to be clickable

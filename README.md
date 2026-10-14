@@ -5,9 +5,9 @@
 ClaudeQuota is a tiny native macOS menu bar app that shows your Claude plan usage limits at a glance — the same numbers as claude.ai → Settings → Usage — without keeping a browser tab open. A color-coded ring gauge sits in your menu bar with your current 5-hour session percentage inside it; click it for the full breakdown.
 
 <p align="center">
-  <img src="Screenshots/Tool/ClaudeQuotaToolv1.3.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits with progress bars" width="320">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.3.1.png" alt="ClaudeQuota menu bar dropdown showing session and weekly usage limits with progress bars" width="305">
   &nbsp;&nbsp;
-  <img src="Screenshots/About/ClaudeQuotaAboutv1.3.png" alt="ClaudeQuota About panel" width="280">
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.3.1.png" alt="ClaudeQuota About panel" width="286">
 </p>
 
 ## Features
@@ -105,7 +105,18 @@ Constants at the top of `Sources/main.swift` (`Config`): poll interval, color th
 
 Every release, newest first, with the screenshots from that version. Click a version to expand it.
 
-### v1.3 — October 12, 2026
+### v1.3.1 — October 14, 2026
+
+Polish: the About panel now shows when the app was last updated and a clearer **Quota Refresh Cycle** line, and the menu's status line reads **Updated @ [time] · Every 3 Mins**.
+
+<p align="center">
+  <img src="Screenshots/Tool/ClaudeQuotaToolv1.3.1.png" alt="ClaudeQuota v1.3.1 dropdown" width="305">
+  &nbsp;&nbsp;
+  <img src="Screenshots/About/ClaudeQuotaAboutv1.3.1.png" alt="ClaudeQuota v1.3.1 About panel" width="286">
+</p>
+
+<details>
+<summary><strong>v1.3 — October 12, 2026</strong></summary>
 
 A redesigned dropdown: color-coded progress bars, reset times in both forms, a plan level line, and **Open Usage Page**.
 
@@ -114,6 +125,8 @@ A redesigned dropdown: color-coded progress bars, reset times in both forms, a p
   &nbsp;&nbsp;
   <img src="Screenshots/About/ClaudeQuotaAboutv1.3.png" alt="ClaudeQuota v1.3 About panel" width="280">
 </p>
+
+</details>
 
 <details>
 <summary><strong>v1.2.1 — October 8, 2026</strong></summary>
